@@ -25,7 +25,7 @@ import com.android.systemui.qs.tiles.HeadsUpTile
 import com.android.systemui.qs.tiles.SyncTile
 import com.android.systemui.qs.tiles.WifiTile
 import com.android.systemui.qs.tiles.UsbTetherTile
-
+import com.android.systemui.qs.tiles.CaffeineTile
 import dagger.Binds
 import dagger.Module
 import dagger.multibindings.IntoMap
@@ -81,4 +81,22 @@ interface QSModuletequila {
     @IntoMap
     @StringKey(UsbTetherTile.TILE_SPEC)
     fun bindUsbTetherTile(usbTetherTile: UsbTetherTile): QSTileImpl<*>
+
+    /** Inject AODTile into tileMap in QSModule */
+    @Binds
+    @IntoMap
+    @StringKey(AODTile.TILE_SPEC)
+    fun bindAODTile(aodTile: AODTile): QSTileImpl<*>
+
+    /** Inject SoundSearchTile into tileMap in QSModule */
+    @Binds
+    @IntoMap
+    @StringKey(SoundSearchTile.TILE_SPEC)
+    fun bindSoundSearchTile(soundSearchTile: SoundSearchTile): QSTileImpl<*>
+
+    /** Inject CaffeineTile into tileMap in QSModule */
+    @Binds
+    @IntoMap
+    @StringKey(CaffeineTile.TILE_SPEC)
+    fun bindCaffeineTile(caffeineTile: CaffeineTile): QSTileImpl<*>
 }
