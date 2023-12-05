@@ -283,8 +283,10 @@ public class PixelPropsUtils {
         sIsPhotos = packageName.equals(PACKAGE_GPHOTOS);
 
         if (sIsGms) {
-            dlog("Spoofing build for GMS");
-            setCertifiedPropsForGms();
+            if (shouldTryToCertifyDevice()) {
+                dlog("Spoofing build for GMS");
+                setCertifiedPropsForGms();
+            }
         } else if (sIsFullGms) {
             dlog("Spoofing build time for GMS");
             setPropValue("TIME", System.currentTimeMillis());
@@ -332,40 +334,50 @@ public class PixelPropsUtils {
         }
     }
 
-    private static void setCertifiedPropsForGms() {
-        if (sCertifiedProps == null || sCertifiedProps.length == 0) return;
+    private static boolean shouldTryToCertifyDevice() {
         final boolean was = isGmsAddAccountActivityOnTop();
-        final TaskStackListener taskStackListener = new TaskStackListener() {
+        final String reason = "GmsAddAccountActivityOnTop";
+        if (!was) {
+            return true;
+        }
+        dlog("Skip spoofing build for GMS, because " + reason + "!");
+        TaskStackListener taskStackListener = new TaskStackListener() {
             @Override
             public void onTaskStackChanged() {
-                final boolean is = isGmsAddAccountActivityOnTop();
-                if (is ^ was) {
-                    dlog("GmsAddAccountActivityOnTop is:" + is + " was:" + was +
-                            ", killing myself!"); // process will restart automatically later
+                final boolean isNow = isGmsAddAccountActivityOnTop();
+                if (isNow ^ was) {
+                    dlog(String.format("%s changed: isNow=%b, was=%b, killing myself!", reason, isNow, was));
                     Process.killProcess(Process.myPid());
                 }
             }
         };
-        if (!was) {
-            dlog("Spoofing build for GMS");
-            setPropValue("BRAND", sCertifiedProps[0]);
-            setPropValue("MANUFACTURER", sCertifiedProps[1]);
-            setPropValue("ID", sCertifiedProps[2].isEmpty() ? getBuildID(sCertifiedProps[6]) : sCertifiedProps[2]);
-            setPropValue("DEVICE", sCertifiedProps[3].isEmpty() ? getDeviceName(sCertifiedProps[6]) : sCertifiedProps[3]);
-            setPropValue("PRODUCT", sCertifiedProps[4].isEmpty() ? getDeviceName(sCertifiedProps[6]) : sCertifiedProps[4]);
-            setPropValue("MODEL", sCertifiedProps[5]);
-            setPropValue("FINGERPRINT", sCertifiedProps[6]);
-            setPropValue("TYPE", sCertifiedProps[7].isEmpty() ? "user" : sCertifiedProps[7]);
-            setPropValue("TAGS", sCertifiedProps[8].isEmpty() ? "release-keys" : sCertifiedProps[8]);
-            setVersionFieldString("SECURITY_PATCH", sCertifiedProps[9].isEmpty() ? Build.VERSION.SECURITY_PATCH : sCertifiedProps[9]);
-        } else {
-            dlog("Skip spoofing build for GMS, because GmsAddAccountActivityOnTop");
-        }
         try {
             ActivityTaskManager.getService().registerTaskStackListener(taskStackListener);
+            return false;
         } catch (Exception e) {
             Log.e(TAG, "Failed to register task stack listener!", e);
+            return true;
         }
+    }
+
+    private static void setCertifiedPropsForGms() {
+        final String[] sCertifiedProps =
+            Resources.getSystem().getStringArray(R.array.config_certifiedBuildProperties);
+        if (sCertifiedProps == null || sCertifiedProps.length == 0) {
+            Log.w(TAG, "sCertifiedProps is empty, Safetynet may fail");
+            return;
+        }
+        dlog("Applying certified props for GMS");
+        setPropValue("BRAND", sCertifiedProps[0]);
+        setPropValue("MANUFACTURER", sCertifiedProps[1]);
+        setPropValue("ID", sCertifiedProps[2].isEmpty() ? getBuildID(sCertifiedProps[6]) : sCertifiedProps[2]);
+        setPropValue("DEVICE", sCertifiedProps[3].isEmpty() ? getDeviceName(sCertifiedProps[6]) : sCertifiedProps[3]);
+        setPropValue("PRODUCT", sCertifiedProps[4].isEmpty() ? getDeviceName(sCertifiedProps[6]) : sCertifiedProps[4]);
+        setPropValue("MODEL", sCertifiedProps[5]);
+        setPropValue("FINGERPRINT", sCertifiedProps[6]);
+        setPropValue("TYPE", sCertifiedProps[7].isEmpty() ? "user" : sCertifiedProps[7]);
+        setPropValue("TAGS", sCertifiedProps[8].isEmpty() ? "release-keys" : sCertifiedProps[8]);
+        setVersionFieldString("SECURITY_PATCH", sCertifiedProps[9].isEmpty() ? Build.VERSION.SECURITY_PATCH : sCertifiedProps[9]);
     }
 
     private static boolean isGmsAddAccountActivityOnTop() {
@@ -434,7 +446,7 @@ public class PixelPropsUtils {
     }
 
     private static boolean isCallerSafetyNet() {
-        return sIsGms && Arrays.stream(Thread.currentThread().getStackTrace())
+        return shouldTryToCertifyDevice() && sIsGms && Arrays.stream(Thread.currentThread().getStackTrace())
                 .anyMatch(elem -> elem.getClassName().contains("DroidGuard"));
     }
 
