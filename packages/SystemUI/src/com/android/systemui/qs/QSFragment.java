@@ -707,6 +707,10 @@ public class QSFragment extends LifecycleFragment implements QS, CommandQueue.Ca
             mQsMediaHost.setSquishFraction(mSquishinessFraction);
         }
         updateMediaPositions();
+        
+        if (onKeyguard) {
+            com.android.systemui.util.WallpaperDepthUtils.getInstance(mRootView.getContext()).updateDepthWallpaper();
+        }
     }
 
     private void setAlphaAnimationProgress(float progress) {

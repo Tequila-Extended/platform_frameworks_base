@@ -68,6 +68,7 @@ import com.android.systemui.power.PowerUI;
 import com.android.systemui.privacy.PrivacyItemController;
 import com.android.systemui.qs.ReduceBrightColorsController;
 import com.android.systemui.qs.tiles.dialog.InternetDialogFactory;
+import com.android.systemui.qs.QSImpl;
 import com.android.systemui.recents.OverviewProxyService;
 import com.android.systemui.screenrecord.RecordingController;
 import com.android.systemui.settings.UserTracker;
@@ -98,12 +99,14 @@ import com.android.systemui.statusbar.phone.LightBarController;
 import com.android.systemui.statusbar.phone.LockscreenGestureLogger;
 import com.android.systemui.statusbar.phone.ManagedProfileController;
 import com.android.systemui.statusbar.phone.ScreenOffAnimationController;
+import com.android.systemui.statusbar.phone.ScrimController;
 import com.android.systemui.statusbar.phone.StatusBarContentInsetsProvider;
 import com.android.systemui.statusbar.phone.StatusBarIconController;
 import com.android.systemui.statusbar.phone.SystemUIDialogManager;
 import com.android.systemui.statusbar.policy.AccessibilityController;
 import com.android.systemui.statusbar.policy.AccessibilityManagerWrapper;
 import com.android.systemui.statusbar.policy.BluetoothController;
+import com.android.systemui.statusbar.policy.ConfigurationController;
 import com.android.systemui.statusbar.policy.CastController;
 import com.android.systemui.statusbar.policy.DataSaverController;
 import com.android.systemui.statusbar.policy.DeviceProvisionedController;
@@ -239,6 +242,7 @@ public class Dependency {
     @Inject Lazy<BroadcastDispatcher> mBroadcastDispatcher;
     @Inject Lazy<AsyncSensorManager> mAsyncSensorManager;
     @Inject Lazy<BluetoothController> mBluetoothController;
+    @Inject Lazy<ConfigurationController> mConfigurationController;    
     @Inject Lazy<LocationController> mLocationController;
     @Inject Lazy<RotationLockController> mRotationLockController;
     @Inject Lazy<ZenModeController> mZenModeController;
@@ -344,7 +348,9 @@ public class Dependency {
     @Inject Lazy<InternetDialogFactory> mInternetDialogFactory;
     @Inject Lazy<FeatureFlags> mFeatureFlagsLazy;
     @Inject Lazy<NotificationSectionsManager> mNotificationSectionsManagerLazy;
+    @Inject Lazy<QSImpl> mQSImpl;
     @Inject Lazy<ScreenOffAnimationController> mScreenOffAnimationController;
+    @Inject Lazy<ScrimController> mScrimController;
     @Inject Lazy<AmbientState> mAmbientStateLazy;
     @Inject Lazy<GroupMembershipManager> mGroupMembershipManagerLazy;
     @Inject Lazy<GroupExpansionManager> mGroupExpansionManagerLazy;
@@ -374,6 +380,7 @@ public class Dependency {
         mProviders.put(AsyncSensorManager.class, mAsyncSensorManager::get);
 
         mProviders.put(BluetoothController.class, mBluetoothController::get);
+        mProviders.put(ConfigurationController.class, mConfigurationController::get);        
         mProviders.put(SensorPrivacyManager.class, mSensorPrivacyManager::get);
 
         mProviders.put(LocationController.class, mLocationController::get);
@@ -546,6 +553,8 @@ public class Dependency {
         mProviders.put(FeatureFlags.class, mFeatureFlagsLazy::get);
         mProviders.put(StatusBarContentInsetsProvider.class, mContentInsetsProviderLazy::get);
         mProviders.put(NotificationSectionsManager.class, mNotificationSectionsManagerLazy::get);
+        mProviders.put(ScrimController.class, mScrimController::get);
+        mProviders.put(QSImpl.class, mQSImpl::get);
         mProviders.put(ScreenOffAnimationController.class, mScreenOffAnimationController::get);
         mProviders.put(AmbientState.class, mAmbientStateLazy::get);
         mProviders.put(GroupMembershipManager.class, mGroupMembershipManagerLazy::get);
