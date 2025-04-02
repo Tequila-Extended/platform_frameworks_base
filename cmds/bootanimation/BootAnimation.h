@@ -43,8 +43,7 @@ class SurfaceControl;
 
 // ---------------------------------------------------------------------------
 
-class BootAnimation : public Thread, public IBinder::DeathRecipient
-{
+class BootAnimation : public Thread, public IBinder::DeathRecipient {
 public:
     static constexpr int MAX_FADED_FRAMES_COUNT = std::numeric_limits<int>::max();
 
@@ -92,10 +91,6 @@ public:
             uint8_t* audioData;
             int audioLength;
             Animation* animation;
-            // Controls if dynamic coloring is enabled for this part.
-            bool useDynamicColoring = false;
-            // Defines if this part is played after the dynamic coloring part.
-            bool postDynamicColoring = false;
 
             bool hasFadingPhase() const {
                 return !playUntilComplete && framesToFadeCount > 0;
@@ -111,12 +106,6 @@ public:
         ZipFileRO* zip;
         Font clockFont;
         Font progressFont;
-         // Controls if dynamic coloring is enabled for the whole animation.
-        bool dynamicColoringEnabled = false;
-        int colorTransitionStart = 0; // Start frame of dynamic color transition.
-        int colorTransitionEnd = 0; // End frame of dynamic color transition.
-        float startColors[4][3]; // Start colors of dynamic color transition.
-        float endColors[4][3];   // End colors of dynamic color transition.
     };
 
     // All callbacks will be called from this class's internal thread.
@@ -128,10 +117,6 @@ public:
 
         // Will be called while animation is playing before each part is
         // played. It will be provided with the part and play count for it.
-        // It will be provided with the partNumber for the part about to be played,
-        // as well as a reference to the part itself. It will also be provided with
-        // which play of that part is about to start, some parts are repeated
-        // multiple times.
         virtual void playPart(int /*partNumber*/, const Animation::Part& /*part*/,
                               int /*playNumber*/) {}
 
@@ -186,15 +171,13 @@ private:
     void drawText(const char* str, const Font& font, bool bold, int* x, int* y);
     void drawClock(const Font& font, const int xPos, const int yPos);
     void drawProgress(int percent, const Font& font, const int xPos, const int yPos);
-    void fadeFrame(int frameLeft, int frameBottom, int frameWidth, int frameHeight,
-                   const Animation::Part& part, int fadedFramesCount);
     void drawTexturedQuad(float xStart, float yStart, float width, float height);
     bool validClock(const Animation::Part& part);
     Animation* loadAnimation(const String8&);
     bool playAnimation(const Animation&);
     void releaseAnimation(Animation*) const;
     bool parseAnimationDesc(Animation&);
-    bool preloadZip(Animation &animation);
+    bool preloadZip(Animation& animation);
     void findBootAnimationFile();
     bool findBootAnimationFileInternal(const std::vector<std::string>& files);
     bool preloadAnimation();
@@ -208,9 +191,9 @@ private:
     bool shouldStopPlayingPart(const Animation::Part& part, int fadedFramesCount,
                                int lastDisplayedProgress);
     void checkExit();
-
     void handleViewport(nsecs_t timestep);
     void initDynamicColors();
+    int calculateTotalFrames(const Animation& animation);
 
     sp<SurfaceComposerClient>       mSession;
     AssetManager mAssets;
@@ -247,10 +230,12 @@ private:
     GLuint mTextCropAreaLocation;
     GLuint mTextTextureLocation;
     GLuint mImageColorProgressLocation;
+    int mTotalFrameCount;  // Total frames across all parts
+    int mCurrentGlobalFrame;  // Current frame in the total timeline
 };
 
 // ---------------------------------------------------------------------------
 
-}; // namespace android
+} // namespace android
 
 #endif // ANDROID_BOOTANIMATION_H
