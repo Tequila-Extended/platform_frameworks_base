@@ -107,12 +107,11 @@ static const char CLOCK_ENABLED_PROP_NAME[] = "persist.sys.bootanim.clock.enable
 static const int ANIM_ENTRY_NAME_MAX = ANIM_PATH_MAX + 1;
 static const int MAX_CHECK_EXIT_INTERVAL_US = 50000;
 static constexpr size_t TEXT_POS_LEN_MAX = 16;
-static const int DYNAMIC_COLOR_COUNT = 4;
 static const char U_TEXTURE[] = "uTexture";
 static const char U_FADE[] = "uFade";
 static const char U_CROP_AREA[] = "uCropArea";
-static const char U_START_COLOR_PREFIX[] = "uStartColor";
-static const char U_END_COLOR_PREFIX[] = "uEndColor";
+static const char U_START_COLOR[] = "uStartColor";  // Single start color (white)
+static const char U_END_COLOR[] = "uEndColor";      // Single end color (Monet)
 static const char U_COLOR_PROGRESS[] = "uColorProgress";
 static const char A_UV[] = "aUv";
 static const char A_POSITION[] = "aPosition";
@@ -131,32 +130,16 @@ static const char IMAGE_FRAG_DYNAMIC_COLORING_SHADER_SOURCE[] = R"(
     uniform sampler2D uTexture;
     uniform float uFade;
     uniform float uColorProgress;
-    uniform vec3 uStartColor0;
-    uniform vec3 uStartColor1;
-    uniform vec3 uStartColor2;
-    uniform vec3 uStartColor3;
-    uniform vec3 uEndColor0;
-    uniform vec3 uEndColor1;
-    uniform vec3 uEndColor2;
-    uniform vec3 uEndColor3;
+    uniform vec3 uStartColor; // White (#FFFFFF)
+    uniform vec3 uEndColor;   // Monet color from persist.bootanim.color1
     varying highp vec2 vUv;
     void main() {
         vec4 mask = texture2D(uTexture, vUv);
-        float r = mask.r;
-        float g = mask.g;
-        float b = mask.b;
-        float a = mask.a;
-        // If all channels have values, render pixel as a shade of white.
-        float useWhiteMask = step(cWhiteMaskThreshold, r)
-            * step(cWhiteMaskThreshold, g)
-            * step(cWhiteMaskThreshold, b)
-            * step(cWhiteMaskThreshold, a);
-        vec3 color = r * mix(uStartColor0, uEndColor0, uColorProgress)
-                + g * mix(uStartColor1, uEndColor1, uColorProgress)
-                + b * mix(uStartColor2, uEndColor2, uColorProgress)
-                + a * mix(uStartColor3, uEndColor3, uColorProgress);
-        color = mix(color, vec3((r + g + b + a) * 0.25), useWhiteMask);
-        gl_FragColor = vec4(color.x, color.y, color.z, (1.0 - uFade));
+        float r = mask.r, g = mask.g, b = mask.b, a = mask.a;
+        float useWhiteMask = step(cWhiteMaskThreshold, r) * step(cWhiteMaskThreshold, g) * 
+                             step(cWhiteMaskThreshold, b) * step(cWhiteMaskThreshold, a);
+        vec3 color = mix(uStartColor, uEndColor, uColorProgress); // Single color transition
+        gl_FragColor = vec4(color, (1.0 - uFade)) * a; // Apply to white areas, preserve alpha
     })";
 static const char IMAGE_FRAG_SHADER_SOURCE[] = R"(
     precision mediump float;
@@ -225,8 +208,6 @@ void BootAnimation::onFirstRef() {
     status_t err = mSession->linkToComposerDeath(this);
     SLOGE_IF(err, "linkToComposerDeath failed (%s) ", strerror(-err));
     if (err == NO_ERROR) {
-        // Load the animation content -- this can be slow (eg 200ms)
-        // called before waitForSurfaceFlinger() in main() to avoid wait
         ALOGD("%sAnimationPreloadTiming start time: %" PRId64 "ms",
                 mShuttingDown ? "Shutdown" : "Boot", elapsedRealtime());
         preloadAnimation();
@@ -240,12 +221,8 @@ sp<SurfaceComposerClient> BootAnimation::session() const {
 }
 
 void BootAnimation::binderDied(const wp<IBinder>&) {
-    // woah, surfaceflinger died!
     SLOGD("SurfaceFlinger died, exiting...");
-
-    // calling requestExit() is not enough here because the Surface code
-    // might be blocked on a condition variable that will never be updated.
-    kill( getpid(), SIGKILL );
+    kill(getpid(), SIGKILL);
     requestExit();
 }
 
@@ -343,9 +320,6 @@ status_t BootAnimation::initTexture(FileMap* map, int* width, int* height,
         premultiplyAlpha);
     auto pixelDeleter = std::unique_ptr<void, decltype(free)*>{ pixels, free };
 
-    // FileMap memory is never released until application exit.
-    // Release it now as the texture is already loaded and the memory used for
-    // the packed resource can be released.
     delete map;
 
     if (!pixels) {
@@ -430,14 +404,12 @@ public:
                     SLOGV("Hotplug received");
 
                     if (!event.hotplug.connected) {
-                        // ignore hotplug disconnect
                         continue;
                     }
                     auto token = SurfaceComposerClient::getPhysicalDisplayToken(
                         event.header.displayId);
 
                     if (token != mBootAnimation->mDisplayToken) {
-                        // ignore hotplug of a secondary display
                         continue;
                     }
 
@@ -500,9 +472,6 @@ status_t BootAnimation::readyToRun() {
         return NAME_NOT_FOUND;
     }
 
-    // this system property specifies multi-display IDs to show the boot animation
-    // multiple ids can be set with comma (,) as separator, for example:
-    // setprop persist.boot.animation.displays 19260422155234049,19261083906282754
     Vector<PhysicalDisplayId> physicalDisplayIds;
     char displayValue[PROPERTY_VALUE_MAX] = "";
     property_get(DISPLAYS_PROP_NAME, displayValue, "");
@@ -527,7 +496,6 @@ status_t BootAnimation::readyToRun() {
                 stream.ignore();
         }
 
-        // the first specified display id is used to retrieve mDisplayToken
         for (const auto id : physicalDisplayIds) {
             if (std::find(ids.begin(), ids.end(), id) != ids.end()) {
                 if (const auto token = SurfaceComposerClient::getPhysicalDisplayToken(id)) {
@@ -538,7 +506,6 @@ status_t BootAnimation::readyToRun() {
         }
     }
 
-    // If the system property is not present or invalid, display 0 is used
     if (mDisplayToken == nullptr) {
         mDisplayToken = SurfaceComposerClient::getPhysicalDisplayToken(ids.front());
         if (mDisplayToken == nullptr) {
@@ -557,14 +524,12 @@ status_t BootAnimation::readyToRun() {
     mMaxHeight = android::base::GetIntProperty("ro.surface_flinger.max_graphics_height", 0);
     ui::Size resolution = displayMode.resolution;
     resolution = limitSurfaceSize(resolution.width, resolution.height);
-    // create the native surface
     sp<SurfaceControl> control = session()->createSurface(String8("BootAnimation"),
             resolution.getWidth(), resolution.getHeight(), PIXEL_FORMAT_RGB_565,
             ISurfaceComposerClient::eOpaque);
 
     SurfaceComposerClient::Transaction t;
     if (isValid) {
-        // In the case of multi-display, boot animation shows on the specified displays
         for (const auto id : physicalDisplayIds) {
             if (std::find(ids.begin(), ids.end(), id) != ids.end()) {
                 if (const auto token = SurfaceComposerClient::getPhysicalDisplayToken(id)) {
@@ -580,12 +545,10 @@ status_t BootAnimation::readyToRun() {
 
     sp<Surface> s = control->getSurface();
 
-    // initialize opengl and egl
     EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     eglInitialize(display, nullptr, nullptr);
     EGLConfig config = getEglConfig(display);
     EGLSurface surface = eglCreateWindowSurface(display, config, s.get(), nullptr);
-    // Initialize egl context with client version number 2.0.
     EGLint contextAttributes[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
     EGLContext context = eglCreateContext(display, config, nullptr, contextAttributes);
     EGLint w, h;
@@ -605,18 +568,10 @@ status_t BootAnimation::readyToRun() {
     mFlingerSurface = s;
     mTargetInset = -1;
 
-    // Rotate the boot animation according to the value specified in the sysprop
-    // ro.bootanim.set_orientation_<display_id>. Four values are supported: ORIENTATION_0,
-    // ORIENTATION_90, ORIENTATION_180 and ORIENTATION_270.
-    // If the value isn't specified or is ORIENTATION_0, nothing will be changed.
-    // This is needed to support having boot animation in orientations different from the natural
-    // device orientation. For example, on tablets that may want to keep natural orientation
-    // portrait for applications compatibility and to have the boot animation in landscape.
     rotateAwayFromNaturalOrientationIfNeeded();
 
     projectSceneToWindow();
 
-    // Register a display event receiver
     mDisplayEventReceiver = std::make_unique<DisplayEventReceiver>();
     status_t status = mDisplayEventReceiver->initCheck();
     SLOGE_IF(status != NO_ERROR, "Initialization of DisplayEventReceiver failed with status: %d",
@@ -631,7 +586,6 @@ void BootAnimation::rotateAwayFromNaturalOrientationIfNeeded() {
     const auto orientation = parseOrientationProperty();
 
     if (orientation == ui::ROTATION_0) {
-        // Do nothing if the sysprop isn't set or is set to ROTATION_0.
         return;
     }
 
@@ -677,7 +631,6 @@ void BootAnimation::projectSceneToWindow() {
 }
 
 void BootAnimation::resizeSurface(int newWidth, int newHeight) {
-    // We assume this function is called on the animation thread.
     if (newWidth == mWidth && newHeight == mHeight) {
         return;
     }
@@ -789,25 +742,23 @@ void BootAnimation::initShaders() {
     GLuint textFragmentShader =
         compileShader(GL_FRAGMENT_SHADER, (const GLchar *)TEXT_FRAG_SHADER_SOURCE);
 
-    // Initialize image shader.
     mImageShader = linkShader(vertexShader, imageFragmentShader);
     GLint positionLocation = glGetAttribLocation(mImageShader, A_POSITION);
     GLint uvLocation = glGetAttribLocation(mImageShader, A_UV);
     mImageTextureLocation = glGetUniformLocation(mImageShader, U_TEXTURE);
     mImageFadeLocation = glGetUniformLocation(mImageShader, U_FADE);
     glEnableVertexAttribArray(positionLocation);
-    glVertexAttribPointer(positionLocation, 2,  GL_FLOAT, GL_FALSE, 0, quadPositions);
+    glVertexAttribPointer(positionLocation, 2, GL_FLOAT, GL_FALSE, 0, quadPositions);
     glVertexAttribPointer(uvLocation, 2, GL_FLOAT, GL_FALSE, 0, quadUVs);
     glEnableVertexAttribArray(uvLocation);
 
-    // Initialize text shader.
     mTextShader = linkShader(vertexShader, textFragmentShader);
     positionLocation = glGetAttribLocation(mTextShader, A_POSITION);
     uvLocation = glGetAttribLocation(mTextShader, A_UV);
     mTextTextureLocation = glGetUniformLocation(mTextShader, U_TEXTURE);
     mTextCropAreaLocation = glGetUniformLocation(mTextShader, U_CROP_AREA);
     glEnableVertexAttribArray(positionLocation);
-    glVertexAttribPointer(positionLocation, 2,  GL_FLOAT, GL_FALSE, 0, quadPositions);
+    glVertexAttribPointer(positionLocation, 2, GL_FLOAT, GL_FALSE, 0, quadPositions);
     glVertexAttribPointer(uvLocation, 2, GL_FLOAT, GL_FALSE, 0, quadUVs);
     glEnableVertexAttribArray(uvLocation);
 }
@@ -816,8 +767,6 @@ bool BootAnimation::threadLoop() {
     bool result;
     initShaders();
 
-    // We have no bootanimation file, so we use the stock android logo
-    // animation.
     if (mZipFileName.isEmpty()) {
         ALOGD("No animation file");
         result = android();
@@ -847,7 +796,6 @@ bool BootAnimation::android() {
 
     mCallbacks->init({});
 
-    // clear screen
     glDisable(GL_DITHER);
     glDisable(GL_SCISSOR_TEST);
     glUseProgram(mImageShader);
@@ -856,7 +804,6 @@ bool BootAnimation::android() {
     glClear(GL_COLOR_BUFFER_BIT);
     eglSwapBuffers(mDisplay, mSurface);
 
-    // Blend state
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     const nsecs_t startTime = systemTime();
@@ -891,7 +838,6 @@ bool BootAnimation::android() {
         if (res == EGL_FALSE)
             break;
 
-        // 12fps: don't animate too fast to preserve CPU
         const nsecs_t sleepTime = 83333 - ns2us(systemTime() - now);
         if (sleepTime > 0)
             usleep(sleepTime);
@@ -905,7 +851,6 @@ bool BootAnimation::android() {
 }
 
 void BootAnimation::checkExit() {
-    // Allow surface flinger to gracefully request shutdown
     char value[PROPERTY_VALUE_MAX];
     property_get(EXIT_PROP_NAME, value, "0");
     int exitnow = atoi(value);
@@ -933,12 +878,10 @@ bool parseTextCoord(const char* str, int* dest) {
     return true;
 }
 
-// Parse two position coordinates. If only string is non-empty, treat it as the y value.
 void parsePosition(const char* str1, const char* str2, int* x, int* y) {
     bool success = false;
-    if (strlen(str1) == 0) {  // No values were specified
-        // success = false
-    } else if (strlen(str2) == 0) {  // we have only one value
+    if (strlen(str1) == 0) {
+    } else if (strlen(str2) == 0) {
         if (parseTextCoord(str1, y)) {
             *x = TEXT_CENTER_VALUE;
             success = true;
@@ -955,13 +898,6 @@ void parsePosition(const char* str1, const char* str2, int* x, int* y) {
     }
 }
 
-// Parse a color represented as an HTML-style 'RRGGBB' string: each pair of
-// characters in str is a hex number in [0, 255], which are converted to
-// floating point values in the range [0.0, 1.0] and placed in the
-// corresponding elements of color.
-//
-// If the input string isn't valid, parseColor returns false and color is
-// left unchanged.
 static bool parseColor(const char str[7], float color[3]) {
     float tmpColor[3];
     for (int i = 0; i < 3; i++) {
@@ -980,19 +916,16 @@ static bool parseColor(const char str[7], float color[3]) {
     return true;
 }
 
-// Parse a color represented as a signed decimal int string.
-// E.g. "-2757722" (whose hex 2's complement is 0xFFD5EBA6).
-// If the input color string is empty, set color with values in defaultColor.
 static void parseColorDecimalString(const std::string& colorString,
     float color[3], float defaultColor[3]) {
-    if (colorString == "") {
+    if (colorString.empty()) {
         memcpy(color, defaultColor, sizeof(float) * 3);
         return;
     }
     int colorInt = atoi(colorString.c_str());
     color[0] = ((float)((colorInt >> 16) & 0xFF)) / 0xFF; // r
-    color[1] = ((float)((colorInt >> 8) & 0xFF)) / 0xFF; // g
-    color[2] = ((float)(colorInt & 0xFF)) / 0xFF; // b
+    color[1] = ((float)((colorInt >> 8) & 0xFF)) / 0xFF;  // g
+    color[2] = ((float)(colorInt & 0xFF)) / 0xFF;         // b
 }
 
 static bool readFile(ZipFileRO* zip, const char* name, String8& outString) {
@@ -1014,9 +947,6 @@ static bool readFile(ZipFileRO* zip, const char* name, String8& outString) {
     return true;
 }
 
-// The font image should be a 96x2 array of character images.  The
-// columns are the printable ASCII characters 0x20 - 0x7f.  The
-// top row is regular text; the bottom row is bold.
 status_t BootAnimation::initFont(Font* font, const char* fallback) {
     status_t status = NO_ERROR;
 
@@ -1038,14 +968,14 @@ status_t BootAnimation::initFont(Font* font, const char* fallback) {
 
     if (status == NO_ERROR) {
         font->char_width = font->texture.w / FONT_NUM_COLS;
-        font->char_height = font->texture.h / FONT_NUM_ROWS / 2;  // There are bold and regular rows
+        font->char_height = font->texture.h / FONT_NUM_ROWS / 2;
     }
 
     return status;
 }
 
 void BootAnimation::drawText(const char* str, const Font& font, bool bold, int* x, int* y) {
-    glEnable(GL_BLEND);  // Allow us to draw on top of the animation
+    glEnable(GL_BLEND);
     glBindTexture(GL_TEXTURE_2D, font.texture.name);
     glUseProgram(mTextShader);
     glUniform1i(mTextTextureLocation, 0);
@@ -1071,11 +1001,9 @@ void BootAnimation::drawText(const char* str, const Font& font, bool bold, int* 
             c = '?';
         }
 
-        // Crop the texture to only the pixels in the current glyph
-        const int charPos = (c - FONT_BEGIN_CHAR);  // Position in the list of valid characters
+        const int charPos = (c - FONT_BEGIN_CHAR);
         const int row = charPos / FONT_NUM_COLS;
         const int col = charPos % FONT_NUM_COLS;
-        // Bold fonts are expected in the second half of each row.
         float v0 = (row + (bold ? 0.5f : 0.0f)) / FONT_NUM_ROWS;
         float u0 = ((float)col) / FONT_NUM_COLS;
         float v1 = v0 + 1.0f / FONT_NUM_ROWS / 2;
@@ -1086,11 +1014,10 @@ void BootAnimation::drawText(const char* str, const Font& font, bool bold, int* 
         *x += font.char_width;
     }
 
-    glDisable(GL_BLEND);  // Return to the animation's default behaviour
+    glDisable(GL_BLEND);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-// We render 12 or 24 hour time.
 void BootAnimation::drawClock(const Font& font, const int xPos, const int yPos) {
     static constexpr char TIME_FORMAT_12[] = "%l:%M";
     static constexpr char TIME_FORMAT_24[] = "%H:%M";
@@ -1120,8 +1047,6 @@ void BootAnimation::drawProgress(int percent, const Font& font, const int xPos, 
     static constexpr int PERCENT_LENGTH = 5;
 
     char percentBuff[PERCENT_LENGTH];
-    // ';' has the ascii code just after ':', and the font resource contains '%'
-    // for that ascii code.
     sprintf(percentBuff, "%d;", percent);
     int x = xPos;
     int y = yPos;
@@ -1138,7 +1063,6 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
     std::string dynamicColoringPartName = "";
     bool postDynamicColoring = false;
 
-    // Parse the description file
     for (;;) {
         const char* endl = strstr(s, "\n");
         if (endl == nullptr) break;
@@ -1154,16 +1078,12 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
         int colorTransitionStart = 0;
         int colorTransitionEnd = 0;
         char path[ANIM_ENTRY_NAME_MAX];
-        char color[7] = "000000"; // default to black if unspecified
+        char color[7] = "000000";
         char clockPos1[TEXT_POS_LEN_MAX + 1] = "";
         char clockPos2[TEXT_POS_LEN_MAX + 1] = "";
         char dynamicColoringPartNameBuffer[ANIM_ENTRY_NAME_MAX];
         char pathType;
-        // start colors default to black if unspecified
-        char start_color_0[7] = "000000";
-        char start_color_1[7] = "000000";
-        char start_color_2[7] = "000000";
-        char start_color_3[7] = "000000";
+        char start_color[7] = "FFFFFF"; // Default to white
 
         int nextReadPos;
 
@@ -1174,7 +1094,6 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
 
         int topLineNumbers = sscanf(l, "%d %d %d %d", &width, &height, &fps, &progress);
         if (topLineNumbers == 3 || topLineNumbers == 4) {
-            // SLOGD("> w=%d, h=%d, fps=%d, progress=%d", width, height, fps, progress);
             animation.width = width;
             animation.height = height;
             animation.fps = fps;
@@ -1183,15 +1102,10 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
             } else {
               animation.progressEnabled = false;
             }
-        } else if (sscanf(l, "dynamic_colors %" STRTO(ANIM_PATH_MAX) "s #%6s #%6s #%6s #%6s %d %d",
-            dynamicColoringPartNameBuffer,
-            start_color_0, start_color_1, start_color_2, start_color_3,
-            &colorTransitionStart, &colorTransitionEnd)) {
+        } else if (sscanf(l, "dynamic_colors %" STRTO(ANIM_PATH_MAX) "s #%6s %d %d",
+            dynamicColoringPartNameBuffer, start_color, &colorTransitionStart, &colorTransitionEnd)) {
             animation.dynamicColoringEnabled = true;
-            parseColor(start_color_0, animation.startColors[0]);
-            parseColor(start_color_1, animation.startColors[1]);
-            parseColor(start_color_2, animation.startColors[2]);
-            parseColor(start_color_3, animation.startColors[3]);
+            parseColor(start_color, animation.startColors[0]); // Only one color used
             animation.colorTransitionStart = colorTransitionStart;
             animation.colorTransitionEnd = colorTransitionEnd;
             dynamicColoringPartName = std::string(dynamicColoringPartNameBuffer);
@@ -1203,19 +1117,14 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
             } else {
                 sscanf(l + nextReadPos, " #%6s %16s %16s", color, clockPos1, clockPos2);
             }
-            // SLOGD("> type=%c, count=%d, pause=%d, path=%s, framesToFadeCount=%d, color=%s, "
-            //       "clockPos1=%s, clockPos2=%s",
-            //       pathType, count, pause, path, framesToFadeCount, color, clockPos1, clockPos2);
             Animation::Part part;
             if (path == dynamicColoringPartName) {
-                // Part is specified to use dynamic coloring.
                 part.useDynamicColoring = true;
                 part.postDynamicColoring = false;
                 postDynamicColoring = true;
             } else {
-                // Part does not use dynamic coloring.
                 part.useDynamicColoring = false;
-                part.postDynamicColoring =  postDynamicColoring;
+                part.postDynamicColoring = postDynamicColoring;
             }
             part.playUntilComplete = pathType == 'c';
             part.framesToFadeCount = framesToFadeCount;
@@ -1234,7 +1143,6 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
             animation.parts.add(part);
         }
         else if (strcmp(l, "$SYSTEM") == 0) {
-            // SLOGD("> SYSTEM");
             Animation::Part part;
             part.playUntilComplete = false;
             part.framesToFadeCount = 0;
@@ -1252,7 +1160,6 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
 }
 
 bool BootAnimation::preloadZip(Animation& animation) {
-    // read all the data structures
     const size_t pcount = animation.parts.size();
     void *cookie = nullptr;
     ZipFileRO* zip = animation.zip;
@@ -1292,14 +1199,12 @@ bool BootAnimation::preloadZip(Animation& animation) {
             for (size_t j = 0; j < pcount; j++) {
                 if (path == animation.parts[j].path) {
                     uint16_t method;
-                    // supports only stored png files
                     if (zip->getEntryInfo(entry, &method, nullptr, nullptr, nullptr, nullptr, nullptr)) {
                         if (method == ZipFileRO::kCompressStored) {
                             FileMap* map = zip->createEntryFileMap(entry);
                             if (map) {
                                 Animation::Part& part(animation.parts.editItemAt(j));
                                 if (leaf == "audio.wav") {
-                                    // a part may have at most one audio file
                                     part.audioData = (uint8_t *)map->getDataPtr();
                                     part.audioLength = map->getDataLength();
                                 } else if (leaf == "trim.txt") {
@@ -1325,12 +1230,10 @@ bool BootAnimation::preloadZip(Animation& animation) {
         }
     }
 
-    // If there is trimData present, override the positioning defaults.
     for (Animation::Part& part : animation.parts) {
         const char* trimDataStr = part.trimData.string();
         for (size_t frameIdx = 0; frameIdx < part.frames.size(); frameIdx++) {
             const char* endl = strstr(trimDataStr, "\n");
-            // No more trimData for this part.
             if (endl == nullptr) {
                 break;
             }
@@ -1364,8 +1267,6 @@ bool BootAnimation::movie() {
     if (mAnimation == nullptr)
         return false;
 
-    // mCallbacks->init() may get called recursively,
-    // this loop is needed to get the same results
     for (const Animation::Part& part : mAnimation->parts) {
         if (part.animation != nullptr) {
             mCallbacks->init(part.animation->parts);
@@ -1386,7 +1287,6 @@ bool BootAnimation::movie() {
         mClockEnabled = false;
     }
 
-    // Check if npot textures are supported
     mUseNpotTextures = false;
     String8 gl_extensions;
     const char* exts = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
@@ -1400,7 +1300,6 @@ bool BootAnimation::movie() {
         }
     }
 
-    // Blend required to draw time on top of animation frames.
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DITHER);
     glDisable(GL_SCISSOR_TEST);
@@ -1450,23 +1349,19 @@ bool BootAnimation::movie() {
 bool BootAnimation::shouldStopPlayingPart(const Animation::Part& part,
                                           const int fadedFramesCount,
                                           const int lastDisplayedProgress) {
-    // stop playing only if it is time to exit and it's a partial part which has been faded out
     return exitPending() && !part.playUntilComplete && fadedFramesCount >= part.framesToFadeCount &&
         (lastDisplayedProgress == 0 || lastDisplayedProgress == 100);
 }
 
-// Linear mapping from range <a1, a2> to range <b1, b2>
 float mapLinear(float x, float a1, float a2, float b1, float b2) {
-    return b1 + ( x - a1 ) * ( b2 - b1 ) / ( a2 - a1 );
+    return b1 + (x - a1) * (b2 - b1) / (a2 - a1);
 }
 
 void BootAnimation::drawTexturedQuad(float xStart, float yStart, float width, float height) {
-    // Map coordinates from screen space to world space.
     float x0 = mapLinear(xStart, 0, mWidth, -1, 1);
     float y0 = mapLinear(yStart, 0, mHeight, -1, 1);
     float x1 = mapLinear(xStart + width, 0, mWidth, -1, 1);
     float y1 = mapLinear(yStart + height, 0, mHeight, -1, 1);
-    // Update quad vertex positions.
     quadPositions[0] = x0;
     quadPositions[1] = y0;
     quadPositions[2] = x1;
@@ -1484,28 +1379,19 @@ void BootAnimation::drawTexturedQuad(float xStart, float yStart, float width, fl
 }
 
 void BootAnimation::initDynamicColors() {
-    for (int i = 0; i < DYNAMIC_COLOR_COUNT; i++) {
-        const auto syspropName = "persist.bootanim.color" + std::to_string(i + 1);
-        const auto syspropValue = android::base::GetProperty(syspropName, "");
-        if (syspropValue != "") {
-            SLOGI("Loaded dynamic color: %s -> %s", syspropName.c_str(), syspropValue.c_str());
-            mDynamicColorsApplied = true;
-        }
-        parseColorDecimalString(syspropValue,
-            mAnimation->endColors[i], mAnimation->startColors[i]);
+    const auto syspropValue = android::base::GetProperty("persist.bootanim.color1", "");
+    if (!syspropValue.empty()) {
+        SLOGI("Loaded dynamic color: persist.bootanim.color1 -> %s", syspropValue.c_str());
+        mDynamicColorsApplied = true;
     }
+    float endColor[3];
+    float defaultStartColor[3] = {1.0f, 1.0f, 1.0f}; // White
+    parseColorDecimalString(syspropValue, endColor, defaultStartColor);
+
     glUseProgram(mImageShader);
-    SLOGI("Dynamically coloring boot animation. Sysprops loaded? %i", mDynamicColorsApplied);
-    for (int i = 0; i < DYNAMIC_COLOR_COUNT; i++) {
-        float *startColor = mAnimation->startColors[i];
-        float *endColor = mAnimation->endColors[i];
-        glUniform3f(glGetUniformLocation(mImageShader,
-            (U_START_COLOR_PREFIX + std::to_string(i)).c_str()),
-            startColor[0], startColor[1], startColor[2]);
-        glUniform3f(glGetUniformLocation(mImageShader,
-            (U_END_COLOR_PREFIX + std::to_string(i)).c_str()),
-            endColor[0], endColor[1], endColor[2]);
-    }
+    glUniform3f(glGetUniformLocation(mImageShader, U_START_COLOR), 1.0f, 1.0f, 1.0f); // White
+    glUniform3f(glGetUniformLocation(mImageShader, U_END_COLOR),
+                endColor[0], endColor[1], endColor[2]);
     mImageColorProgressLocation = glGetUniformLocation(mImageShader, U_COLOR_PROGRESS);
 }
 
@@ -1524,27 +1410,21 @@ bool BootAnimation::playAnimation(const Animation& animation) {
         const Animation::Part& part(animation.parts[i]);
         const size_t fcount = part.frames.size();
 
-        // Handle animation package
         if (part.animation != nullptr) {
             playAnimation(*part.animation);
             if (exitPending())
                 break;
-            continue; //to next part
+            continue;
         }
 
-        // process the part not only while the count allows but also if already fading
         for (int r=0 ; !part.count || r<part.count || fadedFramesCount > 0 ; r++) {
             if (shouldStopPlayingPart(part, fadedFramesCount, lastDisplayedProgress)) break;
 
-            // It's possible that the sysprops were not loaded yet at this boot phase.
-            // If that's the case, then we should keep trying until they are available.
             if (animation.dynamicColoringEnabled && !mDynamicColorsApplied
                 && (part.useDynamicColoring || part.postDynamicColoring)) {
                 SLOGD("Trying to load dynamic color sysprops.");
                 initDynamicColors();
                 if (mDynamicColorsApplied) {
-                    // Sysprops were loaded. Next step is to adjust the animation if we loaded
-                    // the colors after the animation should have started.
                     const int transitionLength = colorTransitionEnd - colorTransitionStart;
                     if (part.postDynamicColoring) {
                         colorTransitionStart = 0;
@@ -1565,8 +1445,6 @@ bool BootAnimation::playAnimation(const Animation& animation) {
                     animation.fileName.string(), part.path.string(), part.count,
                     part.playUntilComplete ? "true" : "false");
 
-            // For the last animation, if we have progress indicator from
-            // the system, display it.
             int currentProgress = android::base::GetIntProperty(PROGRESS_PROP_NAME, 0);
             bool displayProgress = animation.progressEnabled &&
                 (i == (pcount -1)) && currentProgress != 0;
@@ -1574,12 +1452,6 @@ bool BootAnimation::playAnimation(const Animation& animation) {
             for (size_t j=0 ; j<fcount ; j++) {
                 if (shouldStopPlayingPart(part, fadedFramesCount, lastDisplayedProgress)) break;
 
-                // Color progress is
-                // - the animation progress, normalized from
-                //   [colorTransitionStart,colorTransitionEnd] to [0, 1] for the dynamic coloring
-                //   part.
-                // - 0 for parts that come before,
-                // - 1 for parts that come after.
                 float colorProgress = part.useDynamicColoring
                     ? fmin(fmax(
                         ((float)j - colorTransitionStart) /
@@ -1602,9 +1474,7 @@ bool BootAnimation::playAnimation(const Animation& animation) {
                     glGenTextures(1, &frame.tid);
                     glBindTexture(GL_TEXTURE_2D, frame.tid);
                     int w, h;
-                    // Set decoding option to alpha unpremultiplied so that the R, G, B channels
-                    // of transparent pixels are preserved.
-                    initTexture(frame.map, &w, &h, false /* don't premultiply alpha */);
+                    initTexture(frame.map, &w, &h, false);
                 }
 
                 const int trimWidth = frame.trimWidth * ratio_w;
@@ -1614,16 +1484,13 @@ bool BootAnimation::playAnimation(const Animation& animation) {
                 const int xc = animationX + trimX;
                 const int yc = animationY + trimY;
                 glClear(GL_COLOR_BUFFER_BIT);
-                // specify the y center as ceiling((mHeight - frame.trimHeight) / 2)
-                // which is equivalent to mHeight - (yc + frame.trimHeight)
                 const int frameDrawY = mHeight - (yc + trimHeight);
 
                 float fade = 0;
-                // if the part hasn't been stopped yet then continue fading if necessary
                 if (exitPending() && part.hasFadingPhase()) {
                     fade = static_cast<float>(++fadedFramesCount) / part.framesToFadeCount;
                     if (fadedFramesCount >= part.framesToFadeCount) {
-                        fadedFramesCount = MAX_FADED_FRAMES_COUNT; // no more fading
+                        fadedFramesCount = MAX_FADED_FRAMES_COUNT;
                     }
                 }
                 glUseProgram(mImageShader);
@@ -1642,16 +1509,12 @@ bool BootAnimation::playAnimation(const Animation& animation) {
 
                 if (displayProgress) {
                     int newProgress = android::base::GetIntProperty(PROGRESS_PROP_NAME, 0);
-                    // In case the new progress jumped suddenly, still show an
-                    // increment of 1.
                     if (lastDisplayedProgress != 100) {
-                      // Artificially sleep 1/10th a second to slow down the animation.
-                      usleep(100000);
-                      if (lastDisplayedProgress < newProgress) {
-                        lastDisplayedProgress++;
-                      }
+                        usleep(100000);
+                        if (lastDisplayedProgress < newProgress) {
+                            lastDisplayedProgress++;
+                        }
                     }
-                    // Put the progress percentage right below the animation.
                     int posY = animation.height / 3;
                     int posX = TEXT_CENTER_VALUE;
                     drawProgress(lastDisplayedProgress, animation.progressFont, posX, posY);
@@ -1663,7 +1526,6 @@ bool BootAnimation::playAnimation(const Animation& animation) {
 
                 nsecs_t now = systemTime();
                 nsecs_t delay = frameDuration - (now - lastFrame);
-                //SLOGD("%lld, %lld", ns2ms(now - lastFrame), ns2ms(delay));
                 lastFrame = now;
 
                 if (delay > 0) {
@@ -1697,12 +1559,11 @@ bool BootAnimation::playAnimation(const Animation& animation) {
                     android::base::SetProperty(PROGRESS_PROP_NAME, "100");
                     continue;
                 }
-                break; // exit the infinite non-fading part when it has been played at least once
+                break;
             }
         }
     }
 
-    // Free textures created for looping parts now that the animation is done.
     for (const Animation::Part& part : animation.parts) {
         if (part.count != 1) {
             const size_t fcount = part.frames.size();
@@ -1720,8 +1581,6 @@ bool BootAnimation::playAnimation(const Animation& animation) {
 }
 
 void BootAnimation::processDisplayEvents() {
-    // This will poll mDisplayEventReceiver and if there are new events it'll call
-    // displayEventCallback synchronously.
     mLooper->pollOnce(0);
 }
 
@@ -1730,17 +1589,14 @@ void BootAnimation::handleViewport(nsecs_t timestep) {
         return;
     }
     if (mTargetInset < 0) {
-        // Poll the amount for the top display inset. This will return -1 until persistent properties
-        // have been loaded.
         mTargetInset = android::base::GetIntProperty("persist.sys.displayinset.top",
-                -1 /* default */, -1 /* min */, mHeight / 2 /* max */);
+                -1, -1, mHeight / 2);
     }
     if (mTargetInset <= 0) {
         return;
     }
 
     if (mCurrentInset < mTargetInset) {
-        // After the device boots, the inset will effectively be cropped away. We animate this here.
         float fraction = static_cast<float>(mCurrentInset) / mTargetInset;
         int interpolatedInset = (cosf((fraction + 1) * M_PI) / 2.0f + 0.5f) * mTargetInset;
 
@@ -1748,9 +1604,6 @@ void BootAnimation::handleViewport(nsecs_t timestep) {
                 .setCrop(mFlingerSurfaceControl, Rect(0, interpolatedInset, mWidth, mHeight))
                 .apply();
     } else {
-        // At the end of the animation, we switch to the viewport that DisplayManager will apply
-        // later. This changes the coordinate system, and means we must move the surface up by
-        // the inset amount.
         Rect layerStackRect(0, 0, mWidth, mHeight - mTargetInset);
         Rect displayRect(0, mTargetInset, mWidth, mHeight);
 
@@ -1793,7 +1646,7 @@ BootAnimation::Animation* BootAnimation::loadAnimation(const String8& fn) {
 
     ALOGD("%s is loaded successfully", fn.string());
 
-    Animation *animation =  new Animation;
+    Animation *animation = new Animation;
     animation->fileName = fn;
     animation->zip = zip;
     animation->clockFont.map = nullptr;
@@ -1810,8 +1663,8 @@ BootAnimation::Animation* BootAnimation::loadAnimation(const String8& fn) {
 }
 
 bool BootAnimation::updateIsTimeAccurate() {
-    static constexpr long long MAX_TIME_IN_PAST =   60000LL * 60LL * 24LL * 30LL;  // 30 days
-    static constexpr long long MAX_TIME_IN_FUTURE = 60000LL * 90LL;  // 90 minutes
+    static constexpr long long MAX_TIME_IN_PAST =   60000LL * 60LL * 24LL * 30LL;
+    static constexpr long long MAX_TIME_IN_FUTURE = 60000LL * 90LL;
 
     if (mTimeIsAccurate) {
         return true;
@@ -1836,7 +1689,6 @@ bool BootAnimation::updateIsTimeAccurate() {
       if (lastChangedTime > 0) {
         struct timespec now;
         clock_gettime(CLOCK_REALTIME, &now);
-        // Match the Java timestamp format
         long long rtcNow = (now.tv_sec * 1000LL) + (now.tv_nsec / 1000000LL);
         if (ACCURATE_TIME_EPOCH < rtcNow
             && lastChangedTime > (rtcNow - MAX_TIME_IN_PAST)
@@ -1853,7 +1705,6 @@ BootAnimation::TimeCheckThread::TimeCheckThread(BootAnimation* bootAnimation) : 
     mInotifyFd(-1), mBootAnimWd(-1), mTimeWd(-1), mBootAnimation(bootAnimation) {}
 
 BootAnimation::TimeCheckThread::~TimeCheckThread() {
-    // mInotifyFd may be -1 but that's ok since we're not at risk of attempting to close a valid FD.
     close(mInotifyFd);
 }
 
@@ -1870,7 +1721,6 @@ bool BootAnimation::TimeCheckThread::threadLoop() {
 bool BootAnimation::TimeCheckThread::doThreadLoop() {
     static constexpr int BUFF_LEN (10 * (sizeof(struct inotify_event) + NAME_MAX + 1));
 
-    // Poll instead of doing a blocking read so the Thread can exit if requested.
     struct pollfd pfd = { mInotifyFd, POLLIN, 0 };
     ssize_t pollResult = poll(&pfd, 1, 1000);
 
@@ -1881,7 +1731,7 @@ bool BootAnimation::TimeCheckThread::doThreadLoop() {
         return false;
     }
 
-    char buff[BUFF_LEN] __attribute__ ((aligned(__alignof__(struct inotify_event))));;
+    char buff[BUFF_LEN] __attribute__ ((aligned(__alignof__(struct inotify_event))));
     ssize_t length = read(mInotifyFd, buff, BUFF_LEN);
     if (length == 0) {
         return true;
@@ -1905,13 +1755,12 @@ bool BootAnimation::TimeCheckThread::doThreadLoop() {
 }
 
 void BootAnimation::TimeCheckThread::addTimeDirWatch() {
-        mTimeWd = inotify_add_watch(mInotifyFd, BOOTANIM_TIME_DIR_PATH,
-                IN_CLOSE_WRITE | IN_MOVED_TO | IN_ATTRIB);
-        if (mTimeWd > 0) {
-            // No need to watch for the time directory to be created if it already exists
-            inotify_rm_watch(mInotifyFd, mBootAnimWd);
-            mBootAnimWd = -1;
-        }
+    mTimeWd = inotify_add_watch(mInotifyFd, BOOTANIM_TIME_DIR_PATH,
+            IN_CLOSE_WRITE | IN_MOVED_TO | IN_ATTRIB);
+    if (mTimeWd > 0) {
+        inotify_rm_watch(mInotifyFd, mBootAnimWd);
+        mBootAnimWd = -1;
+    }
 }
 
 status_t BootAnimation::TimeCheckThread::readyToRun() {
