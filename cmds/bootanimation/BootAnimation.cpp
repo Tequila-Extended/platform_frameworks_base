@@ -91,7 +91,6 @@ static const char LAST_TIME_CHANGED_FILE_PATH[] = "/data/bootanim/time/last_time
 static const char ACCURATE_TIME_FLAG_FILE_NAME[] = "time_is_accurate";
 static const char ACCURATE_TIME_FLAG_FILE_PATH[] = "/data/bootanim/time/time_is_accurate";
 static const char TIME_FORMAT_12_HOUR_FLAG_FILE_PATH[] = "/data/bootanim/time/time_format_12_hour";
-// Java timestamp format. Don't show the clock if the date is before 2000-01-01 00:00:00.
 static const long long ACCURATE_TIME_EPOCH = 946684800000;
 static constexpr char FONT_BEGIN_CHAR = ' ';
 static constexpr char FONT_END_CHAR = '~' + 1;
@@ -110,8 +109,8 @@ static constexpr size_t TEXT_POS_LEN_MAX = 16;
 static const char U_TEXTURE[] = "uTexture";
 static const char U_FADE[] = "uFade";
 static const char U_CROP_AREA[] = "uCropArea";
-static const char U_START_COLOR[] = "uStartColor";  // Single start color (white)
-static const char U_END_COLOR[] = "uEndColor";      // Single end color (Monet)
+static const char U_START_COLOR[] = "uStartColor";
+static const char U_END_COLOR[] = "uEndColor";
 static const char U_COLOR_PROGRESS[] = "uColorProgress";
 static const char A_UV[] = "aUv";
 static const char A_POSITION[] = "aPosition";
@@ -138,8 +137,8 @@ static const char IMAGE_FRAG_DYNAMIC_COLORING_SHADER_SOURCE[] = R"(
         float r = mask.r, g = mask.g, b = mask.b, a = mask.a;
         float useWhiteMask = step(cWhiteMaskThreshold, r) * step(cWhiteMaskThreshold, g) * 
                              step(cWhiteMaskThreshold, b) * step(cWhiteMaskThreshold, a);
-        vec3 color = mix(uStartColor, uEndColor, uColorProgress); // Single color transition
-        gl_FragColor = vec4(color, (1.0 - uFade)) * a; // Apply to white areas, preserve alpha
+        vec3 color = mix(uStartColor, uEndColor, uColorProgress);
+        gl_FragColor = vec4(color, (1.0 - uFade)) * a;
     })";
 static const char IMAGE_FRAG_SHADER_SOURCE[] = R"(
     precision mediump float;
@@ -182,7 +181,8 @@ static GLfloat quadUVs[] = {
 
 BootAnimation::BootAnimation(sp<Callbacks> callbacks)
         : Thread(false), mLooper(new Looper(false)), mClockEnabled(true), mTimeIsAccurate(false),
-        mTimeFormat12Hour(false), mTimeCheckThread(nullptr), mCallbacks(callbacks) {
+        mTimeFormat12Hour(false), mTimeCheckThread(nullptr), mCallbacks(callbacks),
+        mDynamicColorsApplied(false), mTotalFrameCount(0), mCurrentGlobalFrame(0) {
     mSession = new SurfaceComposerClient();
 
     std::string powerCtl = android::base::GetProperty("sys.powerctl", "");
@@ -733,7 +733,7 @@ GLuint linkShader(GLuint vertexShader, GLuint fragmentShader) {
 }
 
 void BootAnimation::initShaders() {
-    bool dynamicColoringEnabled = mAnimation != nullptr && mAnimation->dynamicColoringEnabled;
+    bool dynamicColoringEnabled = mAnimation != nullptr;
     GLuint vertexShader = compileShader(GL_VERTEX_SHADER, (const GLchar *)VERTEX_SHADER_SOURCE);
     GLuint imageFragmentShader =
         compileShader(GL_FRAGMENT_SHADER, dynamicColoringEnabled
@@ -995,13 +995,13 @@ void BootAnimation::drawText(const char* str, const Font& font, bool bold, int* 
     }
 
     for (int i = 0; i < len; i++) {
-        char c = str[i];
+        char gossamer = str[i];
 
-        if (c < FONT_BEGIN_CHAR || c > FONT_END_CHAR) {
-            c = '?';
+        if (gossamer < FONT_BEGIN_CHAR || gossamer > FONT_END_CHAR) {
+            gossamer = '?';
         }
 
-        const int charPos = (c - FONT_BEGIN_CHAR);
+        const int charPos = (gossamer - FONT_BEGIN_CHAR);
         const int row = charPos / FONT_NUM_COLS;
         const int col = charPos % FONT_NUM_COLS;
         float v0 = (row + (bold ? 0.5f : 0.0f)) / FONT_NUM_ROWS;
@@ -1060,8 +1060,6 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
         return false;
     }
     char const* s = desString.string();
-    std::string dynamicColoringPartName = "";
-    bool postDynamicColoring = false;
 
     for (;;) {
         const char* endl = strstr(s, "\n");
@@ -1075,15 +1073,11 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
         int pause = 0;
         int progress = 0;
         int framesToFadeCount = 0;
-        int colorTransitionStart = 0;
-        int colorTransitionEnd = 0;
         char path[ANIM_ENTRY_NAME_MAX];
         char color[7] = "000000";
         char clockPos1[TEXT_POS_LEN_MAX + 1] = "";
         char clockPos2[TEXT_POS_LEN_MAX + 1] = "";
-        char dynamicColoringPartNameBuffer[ANIM_ENTRY_NAME_MAX];
         char pathType;
-        char start_color[7] = "FFFFFF"; // Default to white
 
         int nextReadPos;
 
@@ -1102,13 +1096,6 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
             } else {
               animation.progressEnabled = false;
             }
-        } else if (sscanf(l, "dynamic_colors %" STRTO(ANIM_PATH_MAX) "s #%6s %d %d",
-            dynamicColoringPartNameBuffer, start_color, &colorTransitionStart, &colorTransitionEnd)) {
-            animation.dynamicColoringEnabled = true;
-            parseColor(start_color, animation.startColors[0]); // Only one color used
-            animation.colorTransitionStart = colorTransitionStart;
-            animation.colorTransitionEnd = colorTransitionEnd;
-            dynamicColoringPartName = std::string(dynamicColoringPartNameBuffer);
         } else if (sscanf(l, "%c %d %d %" STRTO(ANIM_PATH_MAX) "s%n",
                           &pathType, &count, &pause, path, &nextReadPos) >= 4) {
             if (pathType == 'f') {
@@ -1118,14 +1105,8 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
                 sscanf(l + nextReadPos, " #%6s %16s %16s", color, clockPos1, clockPos2);
             }
             Animation::Part part;
-            if (path == dynamicColoringPartName) {
-                part.useDynamicColoring = true;
-                part.postDynamicColoring = false;
-                postDynamicColoring = true;
-            } else {
-                part.useDynamicColoring = false;
-                part.postDynamicColoring = postDynamicColoring;
-            }
+            part.useDynamicColoring = false;  // No longer part-specific
+            part.postDynamicColoring = false;
             part.playUntilComplete = pathType == 'c';
             part.framesToFadeCount = framesToFadeCount;
             part.count = count;
@@ -1141,8 +1122,7 @@ bool BootAnimation::parseAnimationDesc(Animation& animation)  {
             }
             parsePosition(clockPos1, clockPos2, &part.clockPosX, &part.clockPosY);
             animation.parts.add(part);
-        }
-        else if (strcmp(l, "$SYSTEM") == 0) {
+        } else if (strcmp(l, "$SYSTEM") == 0) {
             Animation::Part part;
             part.playUntilComplete = false;
             part.framesToFadeCount = 0;
@@ -1259,6 +1239,17 @@ bool BootAnimation::preloadZip(Animation& animation) {
     return true;
 }
 
+int BootAnimation::calculateTotalFrames(const Animation& animation) {
+    int totalFrames = 0;
+    for (size_t i = 0; i < animation.parts.size(); i++) {
+        const Animation::Part& part = animation.parts[i];
+        int partFrames = part.frames.size();
+        int repeatCount = part.count == 0 ? 1 : part.count;  // 0 means loop once for simplicity
+        totalFrames += partFrames * repeatCount;
+    }
+    return totalFrames;
+}
+
 bool BootAnimation::movie() {
     if (mAnimation == nullptr) {
         mAnimation = loadAnimation(mZipFileName);
@@ -1275,8 +1266,8 @@ bool BootAnimation::movie() {
     mCallbacks->init(mAnimation->parts);
 
     bool anyPartHasClock = false;
-    for (size_t i=0; i < mAnimation->parts.size(); i++) {
-        if(validClock(mAnimation->parts[i])) {
+    for (size_t i = 0; i < mAnimation->parts.size(); i++) {
+        if (validClock(mAnimation->parts[i])) {
             anyPartHasClock = true;
             break;
         }
@@ -1325,9 +1316,7 @@ bool BootAnimation::movie() {
         mTimeCheckThread->run("BootAnimation::TimeCheckThread", PRIORITY_NORMAL);
     }
 
-    if (mAnimation->dynamicColoringEnabled) {
-        initDynamicColors();
-    }
+    initDynamicColors();
 
     playAnimation(*mAnimation);
 
@@ -1383,6 +1372,9 @@ void BootAnimation::initDynamicColors() {
     if (!syspropValue.empty()) {
         SLOGI("Loaded dynamic color: persist.bootanim.color1 -> %s", syspropValue.c_str());
         mDynamicColorsApplied = true;
+    } else {
+        mDynamicColorsApplied = false;
+        return;
     }
     float endColor[3];
     float defaultStartColor[3] = {1.0f, 1.0f, 1.0f}; // White
@@ -1404,9 +1396,10 @@ bool BootAnimation::playAnimation(const Animation& animation) {
 
     int fadedFramesCount = 0;
     int lastDisplayedProgress = 0;
-    int colorTransitionStart = animation.colorTransitionStart;
-    int colorTransitionEnd = animation.colorTransitionEnd;
-    for (size_t i=0 ; i<pcount ; i++) {
+    mTotalFrameCount = calculateTotalFrames(animation);
+    mCurrentGlobalFrame = 0;
+
+    for (size_t i = 0; i < pcount; i++) {
         const Animation::Part& part(animation.parts[i]);
         const size_t fcount = part.frames.size();
 
@@ -1417,29 +1410,17 @@ bool BootAnimation::playAnimation(const Animation& animation) {
             continue;
         }
 
-        for (int r=0 ; !part.count || r<part.count || fadedFramesCount > 0 ; r++) {
+        for (int r = 0; !part.count || r < part.count || fadedFramesCount > 0; r++) {
             if (shouldStopPlayingPart(part, fadedFramesCount, lastDisplayedProgress)) break;
 
-            if (animation.dynamicColoringEnabled && !mDynamicColorsApplied
-                && (part.useDynamicColoring || part.postDynamicColoring)) {
+            if (!mDynamicColorsApplied) {
                 SLOGD("Trying to load dynamic color sysprops.");
                 initDynamicColors();
-                if (mDynamicColorsApplied) {
-                    const int transitionLength = colorTransitionEnd - colorTransitionStart;
-                    if (part.postDynamicColoring) {
-                        colorTransitionStart = 0;
-                        colorTransitionEnd = fmin(transitionLength, fcount - 1);
-                    }
-                }
             }
 
             mCallbacks->playPart(i, part, r);
 
-            glClearColor(
-                    part.backgroundColor[0],
-                    part.backgroundColor[1],
-                    part.backgroundColor[2],
-                    1.0f);
+            glClearColor(part.backgroundColor[0], part.backgroundColor[1], part.backgroundColor[2], 1.0f);
 
             ALOGD("Playing files = %s/%s, Requested repeat = %d, playUntilComplete = %s",
                     animation.fileName.string(), part.path.string(), part.count,
@@ -1447,16 +1428,15 @@ bool BootAnimation::playAnimation(const Animation& animation) {
 
             int currentProgress = android::base::GetIntProperty(PROGRESS_PROP_NAME, 0);
             bool displayProgress = animation.progressEnabled &&
-                (i == (pcount -1)) && currentProgress != 0;
+                (i == (pcount - 1)) && currentProgress != 0;
 
-            for (size_t j=0 ; j<fcount ; j++) {
+            for (size_t j = 0; j < fcount; j++) {
                 if (shouldStopPlayingPart(part, fadedFramesCount, lastDisplayedProgress)) break;
 
-                float colorProgress = part.useDynamicColoring
-                    ? fmin(fmax(
-                        ((float)j - colorTransitionStart) /
-                            fmax(colorTransitionEnd - colorTransitionStart, 1.0f), 0.0f), 1.0f)
-                    : (part.postDynamicColoring ? 1 : 0);
+                float colorProgress = mDynamicColorsApplied
+                    ? static_cast<float>(mCurrentGlobalFrame) / (mTotalFrameCount - 1)
+                    : 0.0f;
+                colorProgress = fmin(fmax(colorProgress, 0.0f), 1.0f);
 
                 processDisplayEvents();
 
@@ -1496,7 +1476,7 @@ bool BootAnimation::playAnimation(const Animation& animation) {
                 glUseProgram(mImageShader);
                 glUniform1i(mImageTextureLocation, 0);
                 glUniform1f(mImageFadeLocation, fade);
-                if (animation.dynamicColoringEnabled) {
+                if (mDynamicColorsApplied) {
                     glUniform1f(mImageColorProgressLocation, colorProgress);
                 }
                 glEnable(GL_BLEND);
@@ -1539,10 +1519,11 @@ bool BootAnimation::playAnimation(const Animation& animation) {
                 }
 
                 checkExit();
+                mCurrentGlobalFrame++;
             }
 
             int pauseDuration = part.pause * ns2us(frameDuration);
-            while(pauseDuration > 0 && !exitPending()){
+            while (pauseDuration > 0 && !exitPending()) {
                 if (pauseDuration > MAX_CHECK_EXIT_INTERVAL_US) {
                     usleep(MAX_CHECK_EXIT_INTERVAL_US);
                     pauseDuration -= MAX_CHECK_EXIT_INTERVAL_US;
